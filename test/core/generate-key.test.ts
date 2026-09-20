@@ -55,6 +55,16 @@ describe('Key Generation', () => {
       expect(key).to.equal('text');
     });
 
+    it('should generate deterministic fallback keys for non-Latin text', () => {
+      const key = generateKey('こんにちは世界');
+      expect(key).to.match(/^text[0-9a-f]{8}$/);
+      expect(generateKey('こんにちは世界')).to.equal(key);
+    });
+
+    it('should generate distinct fallback keys for different non-Latin text', () => {
+      expect(generateKey('こんにちは世界')).to.not.equal(generateKey('你好世界'));
+    });
+
     it('should be deterministic - same input produces same output', () => {
       const text = 'Enter your email address';
       const key1 = generateKey(text);

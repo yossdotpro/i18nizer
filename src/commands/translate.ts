@@ -1,5 +1,7 @@
 import { Args, Command, Flags } from "@oclif/core";
 import chalk from "chalk";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import ora from "ora";
 
@@ -20,6 +22,8 @@ import {
 } from "../core/config/config-manager.js";
 import { Deduplicator } from "../core/deduplication/deduplicator.js";
 import { generateAggregator } from "../core/i18n/generate-aggregator.js";
+import { resolveFlatMessageKeyCollisions } from "../core/i18n/flat-message-keys.js";
+import { formatMessageKey } from "../core/i18n/output-format.js";
 import { parseAiJson } from "../core/i18n/parse-ai-json.js";
 import { saveSourceFile } from "../core/i18n/sace-source-file.js";
 import { writeLocaleFiles } from "../core/i18n/write-files.js";
@@ -135,18 +139,24 @@ export default class Translate extends Command {
       chalk.bold(filesToProcess.length)
     );
     this.log(chalk.cyan("🌐 Locales:"), locales.join(", "));
-    this.log(chalk.cyan("🤖 Provider:"), provider);
+    this.log(
+      chalk.cyan("🤖 Provider:"),
+      flags["dry-run"] ? "deterministic" : provider
+    );
 
     if (flags["dry-run"]) {
       this.log(chalk.yellow("\n🔍 DRY RUN MODE - No files will be modified\n"));
     }
 
     // Initialize cache and deduplicator
-    const projectDir = getProjectDir(cwd);
+    const tempProjectDir = flags["dry-run"]
+      ? fs.mkdtempSync(path.join(os.tmpdir(), "i18nizer-dry-run-"))
+      : undefined;
+    const projectDir = tempProjectDir ?? getProjectDir(cwd);
     const cache = new TranslationCache(projectDir);
     const deduplicator = new Deduplicator(
       cache,
-      config.behavior.useAiForKeys,
+      !flags["dry-run"] && config.behavior.useAiForKeys,
       provider
     );
 
@@ -154,123 +164,138 @@ export default class Translate extends Command {
     let totalReused = 0;
     let totalCached = 0;
 
-    // Process each file sequentially
-    for (const filePath of filesToProcess) {
-      const componentName = path.basename(filePath).replace(/\.(tsx|jsx)$/, "");
-      const spinner = ora(`Processing ${componentName}...`).start();
+    try {
+      // Process each file sequentially
+      for (const filePath of filesToProcess) {
+        const componentName = path.basename(filePath).replace(/\.(tsx|jsx)$/, "");
+        const spinner = ora(`Processing ${componentName}...`).start();
 
-      try {
-        // Parse and extract
-        const sourceFile = parseFile(filePath);
-        const texts = extractTexts(sourceFile, {
-          allowedFunctions: config.behavior.allowedFunctions,
-          allowedMemberFunctions: config.behavior.allowedMemberFunctions,
-          allowedProps: config.behavior.allowedProps,
-        });
+        try {
+          // Parse and extract
+          const sourceFile = parseFile(filePath);
+          const texts = extractTexts(sourceFile, {
+            allowedFunctions: config.behavior.allowedFunctions,
+            allowedMemberFunctions: config.behavior.allowedMemberFunctions,
+            allowedProps: config.behavior.allowedProps,
+          });
 
-        if (texts.length === 0) {
-          spinner.info(`⏭️  ${componentName}: No translatable texts found`);
-          continue;
-        }
+          if (texts.length === 0) {
+            spinner.info(`⏭️  ${componentName}: No translatable texts found`);
+            continue;
+          }
 
-        totalExtracted += texts.length;
+          totalExtracted += texts.length;
 
-        // Deduplicate and assign keys using batch processing
-        const textList = texts.map((t) => t.text);
-        
-        // eslint-disable-next-line no-await-in-loop
-        const deduplicationResults = await deduplicator.deduplicateBatch(
-          textList,
-          componentName,
-          config.behavior.detectDuplicates
-        );
-
-        // Map results back to texts
-        const mappedTexts = texts.map((t) => {
-          const result = deduplicationResults.get(t.text)!;
+          // Deduplicate and assign keys using batch processing
+          const textList = texts.map((t) => t.text);
           
-          if (result.isReused) totalReused++;
-          if (result.isCached) totalCached++;
+          // eslint-disable-next-line no-await-in-loop
+          const deduplicationResults = await deduplicator.deduplicateBatch(
+            textList,
+            componentName,
+            config.behavior.detectDuplicates
+          );
 
-          return {
-            isCached: result.isCached,
-            isPlural: t.isPlural,
-            isRichText: t.isRichText,
-            key: result.key,
-            node: t.node,
-            placeholders: t.placeholders,
-            pluralForms: t.pluralForms,
-            pluralVariable: t.pluralVariable,
-            richTextElements: t.richTextElements,
-            tempKey: t.tempKey,
-            text: t.text,
-          };
-        });
+          // Map results back to texts
+          const mappedTexts = texts.map((t) => {
+            const result = deduplicationResults.get(t.text)!;
+            const formattedKey = formatMessageKey(result.key, config.messages.format);
 
-        // Build translations JSON
-        const i18nJson: Record<string, Record<string, string>> = {};
+            if (result.isReused) totalReused++;
+            if (result.isCached) totalCached++;
 
-        for (const mapped of mappedTexts) {
-          i18nJson[mapped.key] = {};
+            return {
+              isCached: result.isCached,
+              isPlural: t.isPlural,
+              isRichText: t.isRichText,
+              key: formattedKey,
+              node: t.node,
+              placeholders: t.placeholders,
+              pluralForms: t.pluralForms,
+              pluralVariable: t.pluralVariable,
+              richTextElements: t.richTextElements,
+              sequenceNodes: t.sequenceNodes,
+              tempKey: t.tempKey,
+              text: t.text,
+            };
+          });
+          const messagesDir = flags["dry-run"] ? null : getMessagesDir(cwd, config);
+          const collisionLocale = locales.includes(config.messages.defaultLocale)
+            ? config.messages.defaultLocale
+            : locales[0];
+          const collisionSafeTexts =
+            config.messages.format === "inlang-message-format" && messagesDir
+              ? resolveFlatMessageKeyCollisions(
+                  mappedTexts,
+                  componentName,
+                  messagesDir,
+                  collisionLocale
+                )
+              : mappedTexts;
 
-          if (mapped.isCached) {
-            // Use cached translations
-            const cached = cache.get(mapped.text)!;
-            for (const locale of locales) {
-              i18nJson[mapped.key][locale] =
-                cached.locales[locale] ?? mapped.text;
-            }
-          } else {
-            // For plural forms, generate ICU format
-            if (mapped.isPlural && mapped.pluralForms) {
+          // Build translations JSON
+          const i18nJson: Record<string, Record<string, string>> = {};
+
+          for (const mapped of collisionSafeTexts) {
+            i18nJson[mapped.key] = {};
+
+            if (mapped.isCached) {
+              const cached = cache.get(mapped.text)!;
               for (const locale of locales) {
-                // Generate ICU plural format string
+                i18nJson[mapped.key][locale] = cached.locales[locale] ?? mapped.text;
+              }
+            } else if (mapped.isPlural && mapped.pluralForms) {
+              for (const locale of locales) {
                 const icuFormat = `{${mapped.pluralVariable}, plural, one {${mapped.pluralForms.one}} other {${mapped.pluralForms.other}}}`;
                 i18nJson[mapped.key][locale] = icuFormat;
               }
-            } else {
-              // Will need AI translation
+            } else if (flags["dry-run"]) {
               for (const locale of locales) {
-                i18nJson[mapped.key][locale] = ""; // Placeholder
+                i18nJson[mapped.key][locale] = mapped.text;
+              }
+            } else {
+              for (const locale of locales) {
+                i18nJson[mapped.key][locale] = "";
               }
             }
           }
-        }
 
-        // Get AI translations for non-cached texts
-        const textsNeedingTranslation = mappedTexts.filter((t) => !t.isCached);
+          const textsNeedingTranslation = flags["dry-run"]
+            ? []
+            : collisionSafeTexts.filter((t) => !t.isCached && !t.isPlural);
 
-        if (textsNeedingTranslation.length > 0) {
-          spinner.text = `${componentName}: Generating translations with ${provider}...`;
+          if (textsNeedingTranslation.length > 0) {
+            spinner.text = `${componentName}: Generating translations with ${provider}...`;
 
-          const prompt = buildPrompt({
-            componentName,
-            locales,
-            texts: textsNeedingTranslation.map((t) => ({
-              tempKey: t.tempKey,
-              text: t.text,
-            })),
-          });
+            const prompt = buildPrompt({
+              componentName,
+              locales,
+              texts: textsNeedingTranslation.map((t) => ({
+                tempKey: t.tempKey,
+                text: t.text,
+              })),
+            });
 
-          // eslint-disable-next-line no-await-in-loop
-          const raw = await generateTranslations(prompt, provider, aiModel);
-          if (!raw) throw new Error("AI did not return any data");
+            // eslint-disable-next-line no-await-in-loop
+            const raw = await generateTranslations(prompt, provider, aiModel);
+            if (!raw) throw new Error("AI did not return any data");
 
-          const aiJson = parseAiJson(raw);
-          const namespace = aiJson[componentName] as Record<
-            string,
-            Record<string, string>
-          >;
+            const aiJson = parseAiJson(raw);
+            const namespace = aiJson[componentName] as Record<
+              string,
+              Record<string, string>
+            >;
 
-          // Merge AI translations
-          for (const mapped of textsNeedingTranslation) {
-            const aiTranslations = namespace[mapped.tempKey];
-            if (aiTranslations) {
+            for (const mapped of textsNeedingTranslation) {
+              const aiTranslations = namespace[mapped.tempKey];
+              if (!aiTranslations) {
+                continue;
+              }
+
               for (const locale of locales) {
                 i18nJson[mapped.key][locale] = aiTranslations[locale] ?? mapped.text;
               }
 
-              // Update cache
               cache.set({
                 componentName,
                 key: mapped.key,
@@ -279,70 +304,72 @@ export default class Translate extends Command {
               });
             }
           }
-        }
 
-        // Show JSON if requested
-        if (flags["show-json"]) {
-          this.log("\n" + chalk.cyan(`${componentName} JSON:`));
-          this.log(JSON.stringify({ [componentName]: i18nJson }, null, 2));
-          this.log("");
-        }
-
-        // Write files (unless dry-run)
-        if (!flags["dry-run"]) {
-          // Write locale files
-          if (isInitialized) {
-            const messagesDir = getMessagesDir(cwd, config);
-            writeLocaleFiles(componentName, { [componentName]: i18nJson }, locales, messagesDir);
-          } else {
-            // Standalone mode: use home directory
-            writeLocaleFiles(componentName, { [componentName]: i18nJson }, locales);
+          if (flags["show-json"]) {
+            this.log("\n" + chalk.cyan(`${componentName} JSON:`));
+            this.log(JSON.stringify({ [componentName]: i18nJson }, null, 2));
+            this.log("");
           }
 
-          // Rewrite component
-          // Only inject t function if autoInjectT is enabled
-          if (config.behavior.autoInjectT) {
-            insertUseTranslations(sourceFile, componentName);
-          }
-          
-          replaceTempKeysWithT(
-            mappedTexts.map((m) => ({
-              isPlural: m.isPlural,
-              isRichText: m.isRichText,
-              key: m.key,
-              node: m.node,
-              placeholders: m.placeholders,
-              richTextElements: m.richTextElements,
-              tempKey: m.tempKey,
-            })),
-            {
-              allowedFunctions: config.behavior.allowedFunctions,
-              allowedMemberFunctions: config.behavior.allowedMemberFunctions,
-              allowedProps: config.behavior.allowedProps,
+          if (!flags["dry-run"]) {
+            writeLocaleFiles(
+              componentName,
+              { [componentName]: i18nJson },
+              locales,
+              messagesDir!,
+              { format: config.messages.format }
+            );
+
+            if (config.behavior.autoInjectT) {
+              insertUseTranslations(sourceFile, componentName, {
+                i18nLibrary: config.i18nLibrary,
+                import: config.i18n.import,
+              });
             }
-          );
-          saveSourceFile(sourceFile);
-        }
+            
+            replaceTempKeysWithT(
+              collisionSafeTexts.map((m) => ({
+                sequenceNodes: m.sequenceNodes,
+                isPlural: m.isPlural,
+                isRichText: m.isRichText,
+                key: m.key,
+                node: m.node,
+                placeholders: m.placeholders,
+                richTextElements: m.richTextElements,
+                tempKey: m.tempKey,
+              })),
+              {
+                allowedFunctions: config.behavior.allowedFunctions,
+                allowedMemberFunctions: config.behavior.allowedMemberFunctions,
+                allowedProps: config.behavior.allowedProps,
+                i18nLibrary: config.i18nLibrary,
+              }
+            );
+            saveSourceFile(sourceFile);
+          }
 
-        spinner.succeed(
-          `✅ ${componentName}: ${texts.length} strings (${totalReused} reused, ${totalCached} cached)`
-        );
-      } catch (error: unknown) {
-        spinner.fail(`❌ ${componentName}: Failed`);
-        if (error instanceof Error) {
-          this.error(error.message);
+          spinner.succeed(
+            `✅ ${componentName}: ${texts.length} strings (${totalReused} reused, ${totalCached} cached)`
+          );
+        } catch (error: unknown) {
+          spinner.fail(`❌ ${componentName}: Failed`);
+          if (error instanceof Error) {
+            this.error(error.message);
+          }
         }
       }
-    }
 
-    // Save cache
-    if (!flags["dry-run"]) {
-      cache.save();
+      if (!flags["dry-run"]) {
+        cache.save();
 
-      // Generate aggregator if project is initialized
-      if (isInitialized) {
-        const messagesDir = getMessagesDir(cwd, config);
-        generateAggregator(messagesDir);
+        if (isInitialized && config.messages.format === "json") {
+          const messagesDir = getMessagesDir(cwd, config);
+          generateAggregator(messagesDir);
+        }
+      }
+    } finally {
+      if (tempProjectDir) {
+        fs.rmSync(tempProjectDir, { force: true, recursive: true });
       }
     }
 

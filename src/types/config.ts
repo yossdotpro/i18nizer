@@ -3,8 +3,14 @@
  */
 
 export type Framework = "custom" | "nextjs" | "react";
-export type I18nLibrary = "custom" | "i18next" | "next-intl" | "react-i18next";
+export type I18nLibrary =
+  | "custom"
+  | "i18next"
+  | "next-intl"
+  | "paraglide-js"
+  | "react-i18next";
 export type AiProvider = "gemini" | "huggingface" | "openai";
+export type MessagesFormat = "inlang-message-format" | "json";
 
 export interface I18nizerConfig {
   ai?: {
@@ -31,7 +37,7 @@ export interface I18nizerConfig {
   i18nLibrary?: I18nLibrary; // Optional field to track detected library
   messages: {
     defaultLocale: string;
-    format: "json";
+    format: MessagesFormat;
     locales: string[];
     path: string;
   };
@@ -154,5 +160,21 @@ export const I18N_LIBRARY_CONFIGS: Record<I18nLibrary, Partial<I18nizerConfig>> 
       },
     },
     i18nLibrary: "react-i18next",
+  },
+  "paraglide-js": {
+    i18n: {
+      function: "m",
+      import: {
+        named: "m",
+        source: "./paraglide/messages.js",
+      },
+    },
+    i18nLibrary: "paraglide-js",
+    messages: {
+      defaultLocale: "en",
+      format: "inlang-message-format",
+      locales: ["en", "es"],
+      path: "messages",
+    },
   },
 };

@@ -224,4 +224,55 @@ describe('writeLocaleFiles - JSON Output Quality', () => {
     // Should be identical
     expect(content1).to.equal(content2);
   });
+
+  it('should write Paraglide inlang-message-format files to messages/{locale}.json', () => {
+    const namespace = 'Checkout';
+    const paraglideData: Record<string, Record<string, Record<string, string>>> = {
+      Checkout: {
+        greeting: {
+          de: 'Hallo {name}!',
+          en: 'Hello {name}!',
+        },
+        welcome_message: {
+          de: 'Willkommen zurück',
+          en: 'Welcome back',
+        },
+      },
+    };
+    const data = {
+      ...paraglideData,
+    };
+    const locales = ['en', 'de'];
+    const outputDir = path.join(testDir, 'messages');
+    const writeParaglideFiles = writeLocaleFiles as unknown as (
+      namespace: string,
+      data: Record<string, Record<string, Record<string, string>>>,
+      locales: string[],
+      outputDir: string,
+      options: {
+        format: 'inlang-message-format';
+      }
+    ) => void;
+
+    writeParaglideFiles(namespace, data, locales, outputDir, {
+      format: 'inlang-message-format',
+    });
+
+    const enPath = path.join(outputDir, 'en.json');
+    const dePath = path.join(outputDir, 'de.json');
+
+    expect(fs.existsSync(enPath)).to.be.true;
+    expect(fs.existsSync(dePath)).to.be.true;
+    expect(JSON.parse(fs.readFileSync(enPath, 'utf8'))).to.deep.equal({
+      $schema: 'https://inlang.com/schema/inlang-message-format',
+      greeting: 'Hello {name}!',
+      welcome_message: 'Welcome back',
+    });
+    expect(JSON.parse(fs.readFileSync(dePath, 'utf8'))).to.deep.equal({
+      $schema: 'https://inlang.com/schema/inlang-message-format',
+      greeting: 'Hallo {name}!',
+      welcome_message: 'Willkommen zurück',
+    });
+    expect(fs.existsSync(path.join(outputDir, 'en', 'checkout.json'))).to.be.false;
+  });
 });

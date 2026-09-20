@@ -31,8 +31,8 @@ export default class Start extends Command {
       options: ["nextjs", "react", "custom"],
     }),
     i18n: Flags.string({
-      description: "i18n library (next-intl, react-i18next, i18next, custom)",
-      options: ["next-intl", "react-i18next", "i18next", "custom"],
+      description: "i18n library (next-intl, react-i18next, i18next, paraglide-js, custom)",
+      options: ["next-intl", "react-i18next", "i18next", "paraglide-js", "custom"],
     }),
     preset: Flags.string({
       char: "p",
@@ -107,6 +107,7 @@ export default class Start extends Command {
               { name: "next-intl", value: "next-intl" },
               { name: "react-i18next", value: "react-i18next" },
               { name: "i18next", value: "i18next" },
+              { name: "paraglide-js", value: "paraglide-js" },
               { name: "Custom / None", value: "custom" },
             ],
             default: detectedI18n ?? "custom",

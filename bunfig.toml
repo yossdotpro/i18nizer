@@ -1,0 +1,6 @@
+
+[install]
+# Supply-chain defense: require packages to be at least 7 days old before
+# installation. Compromised packages (stolen maintainer tokens) are almost
+# always yanked within hours, well before this window elapses.
+minimumReleaseAge = 604800

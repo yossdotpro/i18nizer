@@ -47,6 +47,10 @@ export function detectI18nLibrary(cwd: string): I18nLibrary | null {
       const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
       
       // Check in order of specificity
+      if (deps["@inlang/paraglide-js"]) {
+        return "paraglide-js";
+      }
+
       if (deps["next-intl"]) {
         return "next-intl";
       }
@@ -153,11 +157,7 @@ export function generateConfig(framework: Framework, i18nLibrary?: I18nLibrary):
   // Framework settings take precedence for non-i18n specific fields
   if (i18nLibrary) {
     const i18nConfig = I18N_LIBRARY_CONFIGS[i18nLibrary];
-    return {
-      ...baseConfig,
-      i18n: i18nConfig.i18n ?? baseConfig.i18n,
-      i18nLibrary: i18nConfig.i18nLibrary,
-    };
+    return mergeConfig(baseConfig, i18nConfig);
   }
   
   return baseConfig;

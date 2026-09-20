@@ -15,23 +15,26 @@
 
 **i18nizer automates the boring parts of i18n.**
 
-If your project already uses **i18next** or **next-intl**, i18nizer:
+If your project already uses **i18next**, **next-intl**, or **Paraglide JS**, i18nizer:
 
 - extracts hardcoded strings from JSX/TSX
-- generates i18n JSON files using **AI-assisted translations**
-- creates readable English keys (**AI-powered & cached**)
-- rewrites your components to use `t("key")`
+- can extract source messages **without AI**
+- can generate translated JSON files using **AI-assisted translations**
+- creates readable keys with deterministic fallback
+- rewrites your components to use `t("key")` or `m.key_name()`
 
 No runtime, no lock-in, no SaaS.  
 Just a CLI that fits into your existing development workflow.
 
 ## 🤖 How translations work
 
-i18nizer uses AI providers (OpenAI, Gemini, Hugging Face) to generate translations
-at development time.
+i18nizer can use AI providers (OpenAI, Gemini, Hugging Face) to generate
+translations at development time.
 
 - Translations are generated once and stored as plain JSON files
 - Output is fully editable and version-controlled
+- `extract` does not require AI
+- `translate --dry-run` does not require AI
 - No AI is required at runtime
 - Cached translations avoid repeated AI requests
 
@@ -39,7 +42,7 @@ You own the result — i18nizer only automates the process.
 
 ## Who is this for?
 
-- React / Next.js developers already using i18next or next-intl
+- React / Next.js developers already using i18next, next-intl, or Paraglide JS
 - Teams tired of manually extracting strings and managing i18n JSONs
 - Projects that want automation without changing runtime behavior
 
@@ -60,6 +63,19 @@ npm install -g i18nizer
 ```
 
 > Requires Node.js 18+
+
+### Use from a local source checkout
+
+If you want to run the CLI from this repository while developing locally:
+
+```bash
+corepack yarn install
+corepack yarn build
+npm link
+i18nizer --help
+```
+
+`npm link` exposes the `i18nizer` command from your local checkout. If you change the source, run `corepack yarn build` again before using the linked binary.
 
 ---
 
@@ -92,7 +108,7 @@ i18nizer start
 This launches an **interactive setup** that will:
 
 - 🔍 Auto-detect your framework (Next.js or React)
-- 🔍 Auto-detect your i18n library (next-intl, react-i18next, i18next)
+- 🔍 Auto-detect your i18n library (next-intl, react-i18next, i18next, paraglide-js)
 - ❓ Ask you to confirm or change the detected settings
 - ✅ Create `i18nizer.config.yml` with optimal defaults
 - 📁 Set up `.i18nizer/` directory for caching and project data
@@ -117,6 +133,9 @@ i18nizer start --framework nextjs --i18n next-intl
 # React with react-i18next
 i18nizer start --framework react --i18n react-i18next
 
+# React with Paraglide JS
+i18nizer start --framework react --i18n paraglide-js
+
 # Custom setup
 i18nizer start --framework custom --i18n custom
 ```
@@ -124,7 +143,7 @@ i18nizer start --framework custom --i18n custom
 **Available options:**
 
 - `--framework`: `nextjs`, `react`, `custom`
-- `--i18n`: `next-intl`, `react-i18next`, `i18next`, `custom`
+- `--i18n`: `next-intl`, `react-i18next`, `i18next`, `paraglide-js`, `custom`
 - `--yes`, `-y`: Skip interactive prompts
 - `--force`, `-f`: Re-initialize existing project
 
@@ -148,6 +167,8 @@ i18nizer translate --all --locales en,es,fr
 i18nizer translate <file> --dry-run
 ```
 
+`translate --dry-run` resolves keys and previews the rewrite flow without calling an AI provider.
+
 **Show generated JSON output:**
 
 ```bash
@@ -170,16 +191,35 @@ This command regenerates the `i18n/messages.generated.ts` file by scanning all J
 
 The aggregator automatically uses valid TypeScript identifiers for imports, converting hyphenated filenames (e.g., `notification-item.json`) to PascalCase identifiers (e.g., `NotificationItem_en`).
 
-### Legacy Command (Still Supported)
+### Extract Source Messages Without AI
 
 ```bash
-i18nizer extract <file-path> --locales en,es,fr --provider openai
+i18nizer extract <file-path> --locales en,es,fr
+```
+
+`extract` is deterministic by default:
+
+- it does **not** require AI translations
+- it writes only the **default/source locale** file
+- it respects the configured output format (`json` or `inlang-message-format`)
+
+Examples:
+
+```bash
+# Standard namespaced JSON
+i18nizer start --framework react --i18n react-i18next
+i18nizer extract src/components/Login.tsx --locales en,es
+
+# Paraglide JS / inlang message format
+i18nizer start --framework react --i18n paraglide-js
+i18nizer extract src/components/Login.tsx --locales en,es
 ```
 
 Flags:
 
-- `--locales` → Languages to generate (default: `en,es`)
-- `--provider` → `openai | gemini | huggingface` (optional)
+- `--locales` → Requested languages; extract writes the default/source locale file
+- `--use-ai-keys` → Use AI for key naming if you explicitly want it
+- `--provider` → `openai | gemini | huggingface` (only relevant with `--use-ai-keys`)
 
 ---
 
@@ -235,6 +275,27 @@ export function Login() {
 
 **Note:** The filename uses lowercase-hyphen format (`login.json`), while the namespace inside uses PascalCase (`Login`).
 
+### Paraglide Output (`messages/en.json`)
+
+```json
+{
+  "$schema": "https://inlang.com/schema/inlang-message-format",
+  "welcome_back": "Welcome back",
+  "please_sign_in_to_continue": "Please sign in to continue",
+  "sign_in": "Sign in"
+}
+```
+
+With Paraglide config, rewritten code uses `m.key_name()`:
+
+```tsx
+import { m } from "./paraglide/messages.js";
+
+export function Login() {
+  return <button>{m.sign_in()}</button>;
+}
+```
+
 ---
 
 ## 📂 Project Structure
@@ -289,7 +350,7 @@ The `i18nizer.config.yml` file controls all aspects of how i18nizer processes yo
 ```yaml
 # Framework and i18n library settings
 framework: react                    # nextjs | react | custom
-i18nLibrary: react-i18next          # next-intl | react-i18next | i18next | custom
+i18nLibrary: react-i18next          # next-intl | react-i18next | i18next | paraglide-js | custom
 
 # AI provider configuration
 ai:
@@ -303,10 +364,10 @@ paths:
 
 # i18n function configuration
 i18n:
-  function: t                       # Translation function name
+  function: t                       # Translation function name (or m for Paraglide)
   import:
-    source: react-i18next           # Package to import from
-    named: useTranslation           # Named import
+    source: react-i18next           # Package/module to import from
+    named: useTranslation           # Named import (or m for Paraglide)
 
 # Translation file settings
 messages:
@@ -315,7 +376,7 @@ messages:
   locales:                          # List of supported locales
     - en
     - es
-  format: json                      # Output format (currently only json)
+  format: json                      # json | inlang-message-format
 
 # Behavior settings
 behavior:
@@ -523,9 +584,11 @@ These paths serve as defaults and can help organize your project structure. The 
 
 - **Project-level integration** with `i18nizer start` and `i18nizer translate`
 - **Configuration system** with `i18nizer.config.yml`
-- **Framework presets** (Next.js + next-intl, React + react-i18next)
+- **Framework presets** (Next.js + next-intl, React + react-i18next, React + Paraglide JS)
 - **Intelligent caching** to avoid redundant AI translation requests
 - **String deduplication** with deterministic key reuse
+- **AI-free extraction** for source/default locale message files
+- **AI-free dry-run mode**
 - **AI-powered English key generation** for consistent, readable keys regardless of source language
 - **Configurable behavior** (allowed functions, props, member functions)
 - **Dry-run mode** to preview changes
@@ -534,7 +597,7 @@ These paths serve as defaults and can help organize your project structure. The 
 - **Rich text formatting documentation** - patterns for JSX within translations
 - Project-wide or single-file translation
 - Works with **JSX & TSX**
-- Rewrites components automatically (`t("key")`)
+- Rewrites components automatically (`t("key")` or `m.key_name()`)
 - Generates **English camelCase keys** (AI-assisted with deterministic fallback)
 - Supports **any number of locales**
 - Isolated TypeScript parsing (no project tsconfig required)
@@ -564,7 +627,7 @@ These paths serve as defaults and can help organize your project structure. The 
 
 ## 🎨 Advanced i18n Patterns
 
-i18nizer extracts translatable strings and generates standard i18n JSON files. For advanced patterns like pluralization and rich text formatting, you can leverage the built-in features of i18next and next-intl.
+i18nizer extracts translatable strings and generates standard i18n message files. Advanced pluralization and rich text handling depend on the runtime you use; the examples below focus on i18next and next-intl patterns.
 
 ### Pluralization Support
 

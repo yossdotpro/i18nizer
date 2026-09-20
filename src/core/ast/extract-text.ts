@@ -1,5 +1,5 @@
 /* eslint-disable complexity */
-import { Node } from "ts-morph";
+import { JsxElement, JsxFragment, Node } from "ts-morph";
 
 import { isTranslatableString } from "./is-translatable.js";
 
@@ -23,6 +23,7 @@ const defaultAllowedProps = new Set([
 export interface ExtractedText {
     node: Node;
     placeholders: string[];
+    sequenceNodes?: Node[];
     tempKey: string;
     text: string;
     isPlural?: boolean;
@@ -45,6 +46,20 @@ export interface ExtractOptions {
 }
 
 // --- Helpers ---
+
+function isJsxContainer(node: Node): node is JsxElement | JsxFragment {
+    return Node.isJsxElement(node) || Node.isJsxFragment(node);
+}
+
+function normalizeFormattedJsxText(text: string): string {
+    if (!/[\n\r\t]/.test(text)) {
+        return text;
+    }
+
+    return text
+        .replaceAll(/\s*\n\s*/g, " ")
+        .replaceAll(/[ \t]{2,}/g, " ");
+}
 
 function processTemplateLiteral(node: Node): null | { placeholders: string[]; text: string } {
     if (Node.isNoSubstitutionTemplateLiteral(node)) {
@@ -92,7 +107,7 @@ function extractRichTextContent(jsxElement: Node): null | {
 
     for (const child of children) {
         if (Node.isJsxText(child)) {
-            richText += child.getText();
+            richText += normalizeFormattedJsxText(child.getFullText());
         } else if (Node.isJsxElement(child)) {
             const opening = child.getOpeningElement();
             const tagName = opening.getTagNameNode().getText();
@@ -101,7 +116,7 @@ function extractRichTextContent(jsxElement: Node): null | {
             // Get inner text of the element
             const innerText = child.getJsxChildren()
                 .filter(c => Node.isJsxText(c))
-                .map(c => c.getText())
+                .map(c => normalizeFormattedJsxText(c.getFullText()))
                 .join('');
 
             // Add to rich text with placeholder
@@ -129,12 +144,8 @@ function detectRichTextPattern(jsxElement: Node): null | {
     elements: Array<{ tag: string; placeholder: string }>;
     hasText: boolean;
 } {
-    if (!Node.isJsxElement(jsxElement) && !Node.isJsxSelfClosingElement(jsxElement)) {
+    if (!Node.isJsxElement(jsxElement)) {
         return null;
-    }
-
-    if (Node.isJsxSelfClosingElement(jsxElement)) {
-        return null; // Self-closing elements don't have rich text
     }
 
     const children = jsxElement.getJsxChildren();
@@ -144,18 +155,15 @@ function detectRichTextPattern(jsxElement: Node): null | {
 
     for (const child of children) {
         if (Node.isJsxText(child)) {
-            const text = child.getText().trim();
+            const text = normalizeFormattedJsxText(child.getFullText()).trim();
             if (text.length > 0) {
                 hasText = true;
             }
-        } else if (Node.isJsxElement(child) || Node.isJsxSelfClosingElement(child)) {
+        } else if (Node.isJsxElement(child)) {
             hasJsxElement = true;
 
             // Get tag name
-            const opening = Node.isJsxElement(child)
-                ? child.getOpeningElement()
-                : child;
-            const tagName = opening.getTagNameNode().getText();
+            const tagName = child.getOpeningElement().getTagNameNode().getText();
 
             // Generate placeholder name based on tag
             const placeholder = tagName.toLowerCase();
@@ -240,6 +248,176 @@ function getFullCallName(node: Node): null | string {
     return null;
 }
 
+function isVariableUsedInJsx(variableDeclaration: Node): boolean {
+    if (!Node.isVariableDeclaration(variableDeclaration)) {
+        return false;
+    }
+
+    const nameNode = variableDeclaration.getNameNode();
+    const variableName = nameNode.getText();
+
+    return variableDeclaration
+        .getSourceFile()
+        .getDescendants()
+        .some((descendant) => {
+            if (!Node.isIdentifier(descendant) || descendant.getText() !== variableName) {
+                return false;
+            }
+
+            if (descendant.getStart() === nameNode.getStart()) {
+                return false;
+            }
+
+            return Boolean(descendant.getFirstAncestor((ancestor) => Node.isJsxExpression(ancestor)));
+        });
+}
+
+function addExtractedText(
+    node: Node,
+    text: string,
+    results: ExtractedText[],
+    seenNodes: Set<Node>,
+    placeholders: string[] = [],
+    sequenceNodes?: Node[]
+) {
+    if (!isTranslatableString(node, text)) {
+        return;
+    }
+
+    const tempKey = `i$fdw_${tempIdCounter++}`;
+    results.push({ node, placeholders, sequenceNodes, tempKey, text });
+    seenNodes.add(node);
+
+    if (sequenceNodes) {
+        for (const sequenceNode of sequenceNodes) {
+            seenNodes.add(sequenceNode);
+        }
+    }
+}
+
+function extractStringsFromVariableInitializer(
+    initializer: Node,
+    results: ExtractedText[],
+    seenNodes: Set<Node>
+) {
+    if (Node.isArrayLiteralExpression(initializer)) {
+        for (const element of initializer.getElements()) {
+            extractStringsFromExpression(element, results, seenNodes);
+        }
+        return;
+    }
+
+    extractStringsFromExpression(initializer, results, seenNodes);
+}
+
+function getSequenceExpressionFragment(expr: Node): null | { placeholders: string[]; text: string } {
+    if (Node.isIdentifier(expr)) {
+        return {
+            placeholders: [expr.getText()],
+            text: `{${expr.getText()}}`,
+        };
+    }
+
+    if (Node.isNumericLiteral(expr)) {
+        return {
+            placeholders: [],
+            text: expr.getText(),
+        };
+    }
+
+    if (Node.isStringLiteral(expr)) {
+        return {
+            placeholders: [],
+            text: expr.getLiteralText(),
+        };
+    }
+
+    if (Node.isNoSubstitutionTemplateLiteral(expr) || Node.isTemplateExpression(expr)) {
+        return processTemplateLiteral(expr);
+    }
+
+    if (Node.isParenthesizedExpression(expr)) {
+        return getSequenceExpressionFragment(expr.getExpression());
+    }
+
+    return null;
+}
+
+function extractJsxSequence(jsxNode: Node): null | {
+    node: Node;
+    placeholders: string[];
+    sequenceNodes: Node[];
+    text: string;
+} {
+    if (!isJsxContainer(jsxNode)) {
+        return null;
+    }
+
+    const children = jsxNode.getJsxChildren();
+    const sequenceNodes: Node[] = [];
+    const placeholders: string[] = [];
+    let hasTextOrBreak = false;
+    let meaningfulNodeCount = 0;
+    let text = "";
+
+    for (const child of children) {
+        if (Node.isJsxText(child)) {
+            if (child.getFullText().trim().length === 0) {
+                continue;
+            }
+
+            sequenceNodes.push(child);
+            meaningfulNodeCount++;
+            hasTextOrBreak = true;
+            text += normalizeFormattedJsxText(child.getFullText());
+            continue;
+        }
+
+        if (Node.isJsxSelfClosingElement(child)) {
+            if (child.getTagNameNode().getText() !== "br") {
+                return null;
+            }
+
+            sequenceNodes.push(child);
+            meaningfulNodeCount++;
+            hasTextOrBreak = true;
+            text += "\n";
+            continue;
+        }
+
+        if (Node.isJsxExpression(child)) {
+            const expr = child.getExpression();
+            if (!expr) {
+                continue;
+            }
+
+            const fragment = getSequenceExpressionFragment(expr);
+            if (!fragment) {
+                return null;
+            }
+
+            sequenceNodes.push(child);
+            meaningfulNodeCount++;
+            text += fragment.text;
+            placeholders.push(...fragment.placeholders);
+            continue;
+        }
+
+        return null;
+    }
+
+    if (!hasTextOrBreak || meaningfulNodeCount <= 1 || sequenceNodes.length === 0) {
+        return null;
+    }
+
+    return {
+        node: sequenceNodes[0],
+        placeholders,
+        sequenceNodes,
+        text,
+    };
+}
+
 /**
  * Recursively extract string literals from complex expressions
  * like ternary operators, logical operators, etc.
@@ -250,11 +428,7 @@ function extractStringsFromExpression(expr: Node, results: ExtractedText[], seen
     // String literal
     if (Node.isStringLiteral(expr)) {
         const text = expr.getLiteralText();
-        if (isTranslatableString(expr, text)) {
-            const tempKey = `i$fdw_${tempIdCounter++}`;
-            results.push({ node: expr, placeholders: [], tempKey, text });
-            seenNodes.add(expr);
-        }
+        addExtractedText(expr, text, results, seenNodes);
 
         return;
     }
@@ -262,10 +436,8 @@ function extractStringsFromExpression(expr: Node, results: ExtractedText[], seen
     // Template literal
     if (Node.isTemplateExpression(expr) || Node.isNoSubstitutionTemplateLiteral(expr)) {
         const processed = processTemplateLiteral(expr);
-        if (processed && isTranslatableString(expr, processed.text)) {
-            const tempKey = `i$fdw_${tempIdCounter++}`;
-            results.push({ node: expr, placeholders: processed.placeholders, tempKey, text: processed.text });
-            seenNodes.add(expr);
+        if (processed) {
+            addExtractedText(expr, processed.text, results, seenNodes, processed.placeholders);
         }
 
         return;
@@ -337,6 +509,13 @@ export function extractTexts(sourceFile: Node, options: ExtractOptions = {}): Ex
     sourceFile.forEachDescendant((node: Node) => {
         if (seenNodes.has(node)) return;
 
+        if (Node.isVariableDeclaration(node) && isVariableUsedInJsx(node)) {
+            const initializer = node.getInitializer();
+            if (initializer) {
+                extractStringsFromVariableInitializer(initializer, results, seenNodes);
+            }
+        }
+
         // Check for rich text pattern in JSX elements
         if (Node.isJsxElement(node)) {
             const richContent = extractRichTextContent(node);
@@ -358,6 +537,21 @@ export function extractTexts(sourceFile: Node, options: ExtractOptions = {}): Ex
             }
         }
 
+        if (isJsxContainer(node)) {
+            const sequence = extractJsxSequence(node);
+            if (sequence) {
+                addExtractedText(
+                    sequence.node,
+                    sequence.text,
+                    results,
+                    seenNodes,
+                    sequence.placeholders,
+                    sequence.sequenceNodes
+                );
+                return;
+            }
+        }
+
         let text: null | string = null;
         let placeholders: string[] = [];
 
@@ -366,15 +560,16 @@ export function extractTexts(sourceFile: Node, options: ExtractOptions = {}): Ex
             const parent = node.getParent();
 
             // Solo permitir texto visible dentro de un elemento JSX
-            if (!Node.isJsxElement(parent)) return;
+            if (!isJsxContainer(parent)) return;
 
-            text = node.getText().trim();
-            if (!text) return;
+            const rawText = node.getFullText();
+            if (rawText.trim().length === 0) return;
+            text = /[\n\r\t]/.test(rawText)
+                ? normalizeFormattedJsxText(rawText).trim()
+                : rawText;
             if (!isTranslatableString(node, text)) return;
 
-            const tempKey = `i$fdw_${tempIdCounter++}`;
-            results.push({ node, placeholders, tempKey, text });
-            seenNodes.add(node);
+            addExtractedText(node, text, results, seenNodes, placeholders);
             return;
         }
 
@@ -394,7 +589,7 @@ export function extractTexts(sourceFile: Node, options: ExtractOptions = {}): Ex
                 }
             }
 
-            if (Node.isJsxElement(parent)) {
+            if (isJsxContainer(parent)) {
                 shouldExtract = true;
             }
 
@@ -445,9 +640,7 @@ export function extractTexts(sourceFile: Node, options: ExtractOptions = {}): Ex
         }
 
         if (shouldExtract) {
-            const tempKey = `i$fdw_${tempIdCounter++}`;
-            results.push({ node, placeholders, tempKey, text });
-            seenNodes.add(node);
+            addExtractedText(node, text, results, seenNodes, placeholders);
         }
     });
 

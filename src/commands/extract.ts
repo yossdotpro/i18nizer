@@ -1,21 +1,26 @@
 import { Args, Command, Flags } from "@oclif/core";
 import chalk from "chalk";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import ora, { Ora } from "ora";
 
-import { generateTranslations, Provider } from "../core/ai/client.js";
-import { buildPrompt } from "../core/ai/promt.js";
+import { Provider } from "../core/ai/client.js";
 import { extractTexts } from "../core/ast/extract-text.js";
-import { insertUseTranslations } from "../core/ast/insert-user-translations.js";
 import { parseFile } from "../core/ast/parse-file.js";
-import { replaceTempKeysWithT } from "../core/ast/replace-text-with-text.js";
 import { TranslationCache } from "../core/cache/translation-cache.js";
+import {
+  detectFramework,
+  generateConfig,
+  getMessagesDir,
+  isProjectInitialized,
+  loadConfig,
+} from "../core/config/config-manager.js";
 import { Deduplicator } from "../core/deduplication/deduplicator.js";
-import { generateAggregator } from "../core/i18n/generate-aggregator.js";
-import { parseAiJson } from "../core/i18n/parse-ai-json.js";
-import { saveSourceFile } from "../core/i18n/sace-source-file.js";
+import { resolveFlatMessageKeyCollisions } from "../core/i18n/flat-message-keys.js";
+import { formatMessageKey } from "../core/i18n/output-format.js";
 import { writeLocaleFiles } from "../core/i18n/write-files.js";
+import { I18nizerConfig } from "../types/config.js";
 
 const VALID_PROVIDERS: Provider[] = ["gemini", "huggingface", "openai"];
 
@@ -31,7 +36,6 @@ export default class Extract extends Command {
   static override flags = {
     locales: Flags.string({
       char: "l",
-      default: "en,es",
       description: "Locales to generate",
     }),
     provider: Flags.string({
@@ -40,8 +44,13 @@ export default class Extract extends Command {
     }),
     "use-ai-keys": Flags.boolean({
       allowNo: true,
-      default: true,
-      description: "Use AI to generate human-readable keys (default: true)",
+      default: false,
+      description: "Use AI to generate human-readable keys (default: false)",
+    }),
+    "dry-run": Flags.boolean({
+      char: "d",
+      default: false,
+      description: "Preview extracted messages without writing files",
     }),
   };
 
@@ -49,9 +58,24 @@ export default class Extract extends Command {
     const { args, flags } = await this.parse(Extract);
 
     this.log(chalk.cyan("📄 File:"), args.file);
-    this.log(chalk.cyan("🌐 Locales:"), flags.locales);
+    // Load or generate config
+    let config: I18nizerConfig;
+    const cwd = process.cwd();
+    if (isProjectInitialized(cwd)) {
+      config = loadConfig(cwd)!;
+    } else {
+      const framework = detectFramework(cwd);
+      config = generateConfig(framework);
+    }
 
-    let provider: Provider = "huggingface";
+    const requestedLocales = flags.locales
+      ? flags.locales.split(",")
+      : config.messages.locales;
+    const outputLocales = [config.messages.defaultLocale];
+
+    this.log(chalk.cyan("🌐 Locales:"), requestedLocales.join(","));
+
+    let provider: Provider = (config.ai?.provider as Provider) || "huggingface";
     if (flags.provider) {
       const p = flags.provider.toLowerCase();
       if (!VALID_PROVIDERS.includes(p as Provider)) {
@@ -65,11 +89,22 @@ export default class Extract extends Command {
       provider = p as Provider;
     }
 
-    this.log(chalk.cyan("🤖 Provider:"), provider);
+    this.log(
+      chalk.cyan("🤖 Provider:"),
+      flags["use-ai-keys"] ? provider : "deterministic"
+    );
+
+    if (flags["dry-run"]) {
+      this.log(chalk.yellow("\n🔍 DRY RUN MODE - No files will be modified\n"));
+    }
 
     // Parse file
     const sourceFile = parseFile(args.file);
-    const texts = extractTexts(sourceFile);
+    const texts = extractTexts(sourceFile, {
+      allowedFunctions: config.behavior.allowedFunctions,
+      allowedMemberFunctions: config.behavior.allowedMemberFunctions,
+      allowedProps: config.behavior.allowedProps,
+    });
 
     if (texts.length === 0) {
       this.log(chalk.yellow("⚠️  No translatable texts found."));
@@ -79,7 +114,6 @@ export default class Extract extends Command {
     const componentName = path
       .basename(args.file)
       .replace(/\.(tsx|jsx)$/, "");
-    const locales = flags.locales.split(",");
 
     // Count unique strings
     const uniqueTexts = new Set(texts.map((t) => t.text));
@@ -89,12 +123,10 @@ export default class Extract extends Command {
     );
 
     // Initialize cache and deduplicator
-    const cwd = process.cwd();
-    const projectDir = path.join(cwd, ".i18nizer");
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "i18nizer-extract-"));
     const cache = new TranslationCache(projectDir);
     const deduplicator = new Deduplicator(cache, flags["use-ai-keys"], provider);
 
-    // Step 1: Generate keys (batch, cache-first)
     let keySpinner: Ora | undefined;
     if (flags["use-ai-keys"]) {
       keySpinner = ora("🧠 Generating keys (batch)...").start();
@@ -102,133 +134,91 @@ export default class Extract extends Command {
       this.log("🔑 Generating keys (deterministic)...");
     }
 
-    const textList = texts.map((t) => t.text);
-    const deduplicationResults = await deduplicator.deduplicateBatch(
-      textList,
-      componentName,
-      false // Standalone extraction: generate fresh keys without reusing from cache
-    );
-
-    const stats = deduplicator.getStats();
-
-    if (keySpinner) {
-      keySpinner.succeed(
-        `🧠 Generated ${chalk.green(uniqueTexts.size)} keys`
-      );
-    } else {
-      this.log(`✅ Generated ${chalk.green(uniqueTexts.size)} keys (deterministic)`);
-    }
-    
-    this.log(`💾 Cache hits: ${chalk.green(stats.cacheHits)}`);
-    this.log(`🤖 AI requests used: ${chalk.green(stats.aiRequestsUsed)}`);
-
-    // Map results back to texts
-    const mappedTexts = texts.map((t) => {
-      const result = deduplicationResults.get(t.text)!;
-      return {
-        isCached: result.isCached,
-        isPlural: t.isPlural,
-        isRichText: t.isRichText,
-        key: result.key,
-        node: t.node,
-        placeholders: t.placeholders,
-        pluralForms: t.pluralForms,
-        pluralVariable: t.pluralVariable,
-        richTextElements: t.richTextElements,
-        tempKey: t.tempKey,
-        text: t.text,
-      };
-    });
-
-    // Step 2: Generate translations (batch, separate from key generation)
-    const spinner = ora(`💬 Generating translations with ${provider}...`).start();
-
     try {
-      // Build prompt with the keys we already generated
-      const prompt = buildPrompt({
+      const textList = texts.map((t) => t.text);
+      const deduplicationResults = await deduplicator.deduplicateBatch(
+        textList,
         componentName,
-        locales,
-        texts: mappedTexts.map((t) => ({ tempKey: t.tempKey, text: t.text })),
+        config.behavior.detectDuplicates
+      );
+
+      const stats = deduplicator.getStats();
+
+      if (keySpinner) {
+        keySpinner.succeed(
+          `🧠 Generated ${chalk.green(uniqueTexts.size)} keys`
+        );
+      } else {
+        this.log(`✅ Generated ${chalk.green(uniqueTexts.size)} keys (deterministic)`);
+      }
+      
+      this.log(`💾 Cache hits: ${chalk.green(stats.cacheHits)}`);
+      this.log(`🤖 AI requests used: ${chalk.green(stats.aiRequestsUsed)}`);
+
+      const mappedTexts = texts.map((t) => {
+        const result = deduplicationResults.get(t.text)!;
+        return {
+          isPlural: t.isPlural,
+          key: formatMessageKey(result.key, config.messages.format),
+          placeholders: t.placeholders,
+          pluralForms: t.pluralForms,
+          pluralVariable: t.pluralVariable,
+          sequenceNodes: t.sequenceNodes,
+          tempKey: t.tempKey,
+          text: t.text,
+        };
       });
-
-      const raw = await generateTranslations(prompt, provider);
-
-      if (!raw) throw new Error("AI did not return any data");
-
-      const json = parseAiJson(raw);
-      const namespace = componentName;
-      const jsonNamespace =
-        (json[namespace] as Record<string, Record<string, string>>) || {};
+      const messagesDir = flags["dry-run"] ? null : getMessagesDir(cwd, config);
+      const collisionSafeTexts =
+        config.messages.format === "inlang-message-format" && messagesDir
+          ? resolveFlatMessageKeyCollisions(
+              mappedTexts,
+              componentName,
+              messagesDir,
+              config.messages.defaultLocale
+            )
+          : mappedTexts;
 
       const i18nJson: Record<string, Record<string, string>> = {};
 
-      // Use our generated keys, not the AI's keys
-      for (const mapped of mappedTexts) {
+      for (const mapped of collisionSafeTexts) {
         i18nJson[mapped.key] = {};
-        
-        // For plural forms, generate ICU format directly
+
         if (mapped.isPlural && mapped.pluralForms) {
-          for (const locale of locales) {
+          for (const locale of outputLocales) {
             const icuFormat = `{${mapped.pluralVariable}, plural, one {${mapped.pluralForms.one}} other {${mapped.pluralForms.other}}}`;
             i18nJson[mapped.key][locale] = icuFormat;
           }
         } else {
-          const translations = jsonNamespace[mapped.tempKey];
-          if (!translations) {
-            throw new Error(`No translations found for tempKey: ${mapped.tempKey}`);
-          }
-
-          for (const locale of locales) {
-            i18nJson[mapped.key][locale] = translations[locale];
+          for (const locale of outputLocales) {
+            i18nJson[mapped.key][locale] = mapped.text;
           }
         }
-
-        // Update cache
-        cache.set({
-          componentName,
-          key: mapped.key,
-          locales: i18nJson[mapped.key],
-          text: mapped.text,
-        });
       }
 
-      writeLocaleFiles(componentName, { [componentName]: i18nJson }, locales);
-
-      spinner.succeed(`✅ Translations generated with ${provider}`);
-
-      this.log(`🔗 Mapped ${chalk.green(mappedTexts.length)} texts to keys`);
-
-      insertUseTranslations(sourceFile, componentName);
-      replaceTempKeysWithT(
-        mappedTexts.map((m) => ({
-          isPlural: m.isPlural,
-          isRichText: m.isRichText,
-          key: m.key,
-          node: m.node,
-          placeholders: m.placeholders,
-          richTextElements: m.richTextElements,
-          tempKey: m.tempKey,
-        }))
-      );
-      saveSourceFile(sourceFile);
-
-      // Save cache
-      cache.save();
-
-      // Generate aggregator (extract uses home directory for standalone mode)
-      const homeDir = os.homedir();
-      const standaloneMessagesDir = path.join(homeDir, ".i18nizer", "messages");
-      generateAggregator(standaloneMessagesDir);
-
-      this.log(chalk.green("✨ Component rewritten with t() calls"));
-      this.log(chalk.green(`🌍 JSON files generated using ${provider}`));
+      if (!flags["dry-run"]) {
+        writeLocaleFiles(
+          componentName,
+          { [componentName]: i18nJson },
+          outputLocales,
+          messagesDir!,
+          { format: config.messages.format }
+        );
+        this.log(chalk.green("🌍 JSON files generated without AI translations"));
+      } else {
+        this.log(chalk.green("🌍 Extraction preview generated without writing locale files"));
+      }
     } catch (error: unknown) {
-      spinner.fail(`❌ Failed to generate translations with ${provider}`);
+      if (keySpinner) {
+        keySpinner.fail("❌ Failed to generate extraction output");
+      }
       if (error instanceof Error) {
         this.error(error.message);
       } else {
         this.error("An unknown error occurred");
       }
+    } finally {
+      fs.rmSync(projectDir, { force: true, recursive: true });
     }
   }
 }

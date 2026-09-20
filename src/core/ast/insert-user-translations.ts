@@ -1,6 +1,50 @@
 import { Block, SourceFile, SyntaxKind, VariableDeclaration, VariableDeclarationKind } from "ts-morph";
 
-export function insertUseTranslations(sourceFile: SourceFile, namespace: string) {
+export interface InsertTranslationsOptions {
+    i18nLibrary?: string;
+    import?: {
+        named: string;
+        source: string;
+    };
+}
+
+function ensureNamedImport(
+    sourceFile: SourceFile,
+    namedImport: string,
+    moduleSpecifier: string
+) {
+    const existingImport = sourceFile.getImportDeclaration(
+        (declaration) => declaration.getModuleSpecifierValue() === moduleSpecifier
+    );
+
+    if (existingImport) {
+        const hasNamedImport = existingImport
+            .getNamedImports()
+            .some((named) => named.getName() === namedImport);
+
+        if (!hasNamedImport) {
+            existingImport.addNamedImport(namedImport);
+        }
+
+        return;
+    }
+
+    sourceFile.insertImportDeclaration(0, {
+        moduleSpecifier,
+        namedImports: [namedImport],
+    });
+}
+
+export function insertUseTranslations(
+    sourceFile: SourceFile,
+    namespace: string,
+    options: InsertTranslationsOptions = {}
+) {
+    if (options.i18nLibrary === "paraglide-js" && options.import) {
+        ensureNamedImport(sourceFile, options.import.named, options.import.source);
+        return;
+    }
+
     const defaultExport = sourceFile.getDefaultExportSymbol();
     if (!defaultExport) return;
 

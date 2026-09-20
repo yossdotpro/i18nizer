@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import {
   detectFramework,
+  detectI18nLibrary,
   generateConfig,
   getMessagesDir,
   getProjectDir,
@@ -71,6 +72,24 @@ describe('Config Manager', () => {
     });
   });
 
+  describe('detectI18nLibrary', () => {
+    it('should detect Paraglide JS from package.json', () => {
+      const packageJson = {
+        dependencies: {
+          '@inlang/paraglide-js': '^2.0.0',
+          react: '^18.0.0',
+        },
+      };
+      fs.writeFileSync(
+        path.join(testDir, 'package.json'),
+        JSON.stringify(packageJson)
+      );
+
+      const i18nLibrary = detectI18nLibrary(testDir);
+      expect(i18nLibrary).to.equal('paraglide-js');
+    });
+  });
+
   describe('generateConfig', () => {
     it('should generate Next.js config', () => {
       const config = generateConfig('nextjs');
@@ -92,6 +111,15 @@ describe('Config Manager', () => {
       expect(config.behavior.opinionatedStructure).to.be.true;
       expect(config.behavior.allowedFunctions).to.include('alert');
       expect(config.behavior.allowedProps).to.include('placeholder');
+    });
+
+    it('should generate Paraglide JS config', () => {
+      const config = generateConfig('react', 'paraglide-js' as never);
+      expect(config.i18nLibrary).to.equal('paraglide-js');
+      expect(config.i18n.function).to.equal('m');
+      expect(config.i18n.import.named).to.equal('m');
+      expect(config.i18n.import.source).to.equal('./paraglide/messages.js');
+      expect(config.messages.path).to.equal('messages');
     });
   });
 

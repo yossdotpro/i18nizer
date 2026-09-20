@@ -19,6 +19,21 @@ function toCamelCase(str: string): string {
     .join("");
 }
 
+function hashText(text: string): string {
+  let hash = 2_166_136_261;
+
+  for (const character of text) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16_777_619);
+  }
+
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function containsLettersOrDigits(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(text);
+}
+
 /**
  * Generate a deterministic key from text.
  * 
@@ -36,17 +51,24 @@ export function generateKey(text: string): string {
   const cleanedText = text.replaceAll(/\{[^}]+\}/g, "");
   
   // Replace apostrophes followed by 's' with just 's' (e.g., "User's" -> "Users")
-  const normalizedText = cleanedText.replaceAll(/'s\b/g, "s");
+  const normalizedText = cleanedText
+    .normalize("NFKD")
+    .replaceAll(/[\u0300-\u036f]/g, "")
+    .replaceAll(/'s\b/g, "s");
   
   // Split into words and take first 4-5 significant words
   const words = normalizedText
-    .replaceAll(/[^\w\s]/g, " ") // Replace special chars (note: \w includes underscores, so this won't replace them)
+    .replaceAll(/[^A-Za-z0-9_\s]/g, " ")
     .replaceAll("_", " ") // Explicitly replace underscores with spaces
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 5);
   
   if (words.length === 0) {
+    if (containsLettersOrDigits(cleanedText)) {
+      return `text${hashText(cleanedText)}`;
+    }
+
     return "text";
   }
   
@@ -54,6 +76,10 @@ export function generateKey(text: string): string {
   
   // Ensure minimum key length
   if (key.length < 3) {
+    if (containsLettersOrDigits(cleanedText) && !/[A-Za-z0-9]/.test(cleanedText)) {
+      return `text${hashText(cleanedText)}`;
+    }
+
     return "text";
   }
   
